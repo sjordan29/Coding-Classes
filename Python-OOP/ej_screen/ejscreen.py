@@ -44,6 +44,17 @@ class EJScreenAPI:
         # parse type of aoi (geometry or census and then which sub-type)
         if isinstance(self.aoi_input, Point):
             return PointAOI(self.geom, self.buffer, self.unit)
+        elif isinstance(self.areaid, float):
+            if len(str(self.areaid)) == 5:
+                return County(self.areaid)
+            elif len(str(self.areaid)) == 7:
+                return City(self.areaid)
+            elif len(str(self.areaid)) == 11:
+                return Tract(self.areaid)
+            elif len(str(self.areaid)) == 12:
+                return BlockGroup(self.areaid)
+            else:
+                raise ValueError("areaid must be a county, census tract, or block group FIPS code")
         pass
 
     def _format_aoi_input(self):
@@ -123,28 +134,32 @@ class PolygonAOI(GeometryAOI):
 
 ## Census
 class Census: 
-    def __init__(self, geom: str):
+    def __init__(self, FIPS: float, geom: str = None):
         self.geom = geom
         self.payload = {
-            'namestr': '', 
+            'namestr': FIPS, 
             'geometry': '', 
             'distance': '',
-            'unit': '',
-            'areatype': '',
-            'areaid': '', 
+            'unit': '9035',
+            'areatype': self._define_area_type,
+            'areaid': FIPS, 
             'f':'pjson'
         }
 
 class BlockGroup(Census):
-    pass
+    def _define_area_type(self):
+        return 'blockgroup'
 
 class Tract(Census):
-    pass
+    def _define_area_type(self):
+        return 'tract'
 
 class City(Census):
-    pass
+    def _define_area_type(self):
+        return 'city'
 
 class County(Census):
-    pass
+    def _define_area_type(self):
+        return 'county'
 
 
