@@ -19,12 +19,12 @@ class EJScreenAPI:
     api_base_url = 'https://ejscreen.epa.gov/mapper/ejscreenRESTbroker.aspx'
 
     def __init__(self, 
-        namestr: Union[str, List[Union[str, int]]] = None,
+        namestr: float = None,
         geometry: Union[Point, LineString, Polygon, gpd.GeoDataFrame] = None,
         buffer: float = None,
         unit: str = 'miles', 
-        areatype: Union[str, List[str]] = None,
-        areaid: Union[str, List[str, int]] = None,):
+        areatype: str = None,
+        areaid: float = None,):
 
         # initialize parameters
         self.namestr = namestr
@@ -37,13 +37,37 @@ class EJScreenAPI:
         self._aoi_type = None # census or geometry
 
         # determine if census-type aoi or geometry-type aoi
+        self._determine_aoi_type()
+        print("AOI type:", self._aoi_type)
+        
+        # format AOI input for Geometry
+        if self._aoi_type == "Geometry":
+            self._format_geometry() # determines if single or batch request
 
-        self._format_aoi_input() # determines if single or batch request
+        self.request_aoi = self._define_aoi()
+    
+    def _determine_aoi_type(self):
+        if (self.namestr is None) & (not self.geometry is None):
+            self._aoi_type = "Geometry"
+        elif (not self.namestr is None) & (self.geometry is None):
+            self._aoi_type = "Census"
+        else:
+            raise ValueError("Query type ambiguous. Please enter area_id for Census data OR geometry for geographic data.")
 
     def _define_aoi(self):
         # parse type of aoi (geometry or census and then which sub-type)
-        if isinstance(self.aoi_input, Point):
-            return PointAOI(self.geom, self.buffer, self.unit)
+        if isinstance(self.geometry, Point):
+            if self.buffer is None:
+                print(f'Buffer required for Point type geometry. Assuming a buffer of 1 {self.unit}.')
+                self.buffer = 1
+            return PointAOI(self.geometry, self.buffer, self.unit)
+        elif isinstance(self.geometry, LineString):
+            if self.buffer is None:
+                print(f'Buffer required for LineString type geometry. Assuming a buffer of 1 {self.unit}.')
+                self.buffer = 1
+            return LineAOI(self.geometry, self.buffer, self.unit)
+        elif isinstance(self.geometry, Polygon):
+            return PolygonAOI(self.geometry, self.buffer, self.unit)
         elif isinstance(self.areaid, float):
             if len(str(self.areaid)) == 5:
                 return County(self.areaid)
@@ -57,22 +81,22 @@ class EJScreenAPI:
                 raise ValueError("areaid must be a county, census tract, or block group FIPS code")
         pass
 
-    def _format_aoi_input(self):
-        # need to get geometry to shapely geometry for EJGeometry classes
-        if isinstance(self.aoi_input, base.BaseGeometry):
+    def _format_geometry(self):
+        # TO DO: currently assumes 
+        if isinstance(self.geometry, base.BaseGeometry):
             self._request_type = 'Single'
-        elif isinstance(self.aoi_input, gpd.GeoDataFrame):
+        elif isinstance(self.geometry, gpd.GeoDataFrame):
             self._request_type = 'Batch'
         else:
-            if isinstance(self.aoi_input, List):
-                if len(self.aoi_input) == 1:
-                    self._aoi_input = Point(self._aoi_input)
+            if isinstance(self.geometry, List):
+                if len(self.geometry) == 1:
+                    self.geometry = Point(self.geometry)
                     self._request_type = 'Single'
-                elif (len(self.aoi_input) > 1) and (self.aoi_input[0] == self.aoi_input[-1]):
-                    self._aoi_input = Polygon(self.aoi_input)
+                elif (len(self.geometry) > 1) and (self.geometry[0] == self.geometry[-1]):
+                    self.geometry = Polygon(self.geometry)
                     self._request_type = 'Single'
-                elif (len(self.aoi_input) > 1):
-                    self._aoi_input = LineString(self.aoi_input)
+                elif (len(self.geometry) > 1):
+                    self.geometry = LineString(self.geometry)
                     self._request_type = 'Single'
                 else:
                     raise ValueError("aoi_input must be a geodataframe, Shapely geometry, or Shapely-compatible list of coordinate pairs")
@@ -80,11 +104,34 @@ class EJScreenAPI:
                     
 
     def send_request(self):
-        self.full_url = self.api_base_url + "?" +  urlencode(self.payload, safe=":+{}[]'', ").replace("+", '')
+        self.full_url = self.api_base_url + "?" +  urlencode(self.request_aoi.payload, safe=":+{}[]'', ").replace("+", '')
         self.response = requests.get(self.full_url)
+        self.json = self.response.json()
 
-    def get_data(self):
-        return self.response.json()
+    
+    def _json_to_df(self):
+        df = pd.json_normalize(self.json)
+        # convert % columns to decimals
+        # might be better to just look up which fields are %s based on documentation
+        for col in df.columns:
+            if str(df[col][0])[-1] == "%":
+                df[col] = df[col].str.rstrip('%').astype('float') / 100
+        # convert to numeric
+        df = df.apply(pd.to_numeric, errors='ignore')
+        return df
+    
+    def get_data(self, type='json'):
+        if type == 'json':
+            return self.json
+        elif type == 'pandas':
+            return self._json_to_df()
+        elif type == 'geopandas':
+            df = self._json_to_df()
+            geometry = [self.geometry]
+            return gpd.GeoDataFrame(df, crs = "EPSG:4326", geometry=geometry)
+        else:
+            raise ValueError("type must be 'json', 'pandas', or 'geopandas'")
+
 
     def batch_request(self) -> pd.DataFrame:
         #  just geodataframes?
@@ -94,8 +141,10 @@ class EJScreenAPI:
 
 ### GEOMETRY 
 class GeometryAOI: 
-    def __init__(self, geom = Union[Polygon, LineString, Point], buffer: float = 1, unit: str = 'miles'):
+    def __init__(self, geom: Union[Polygon, LineString, Point], buffer: float, unit: str):
         self.geom = geom
+        if buffer is None:
+            buffer = ""
         self.payload = {
             'namestr': '', 
             'geometry': f"{self._define_spatial_reference()}",
@@ -106,9 +155,7 @@ class GeometryAOI:
             'f':'pjson'
         }
     def _stylize_geometry(self):
-        coords = self.geom.coords[:]
-        geom_list = [list(t) for t in coords] # convert tuples to list
-        return geom_list
+        pass
 
     def _define_spatial_reference(self):
         pass
@@ -120,12 +167,22 @@ class PointAOI(GeometryAOI):
         return geom_dict
 
 class LineAOI(GeometryAOI):
+    def _stylize_geometry(self):
+        coords = self.geom.coords[:]
+        geom_list = [[list(t) for t in coords]] # convert tuples to list
+        return geom_list
+
     def _define_spatial_reference(self):
         geom_list = self._stylize_geometry()
         geom_dict = {'spatialReference':{'wkid':4326},'paths': geom_list}
         return geom_dict
 
 class PolygonAOI(GeometryAOI):
+    def _stylize_geometry(self):
+        coords = self.geom.exterior.coords[:]
+        geom_list = [[list(t) for t in coords]] # convert tuples to list
+        return geom_list
+
     def _define_spatial_reference(self):
         geom_list = self._stylize_geometry()
         geom_dict = {'spatialReference':{'wkid':4326},'rings': geom_list}
