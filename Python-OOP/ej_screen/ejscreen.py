@@ -1,4 +1,5 @@
 from typing import Union, List
+from abc import ABC, abstractmethod
 
 import requests
 from shapely.geometry import Polygon, LineString, Point, base
@@ -13,7 +14,73 @@ UNITS = {
 }
 
 
-# need tow ork out logic 
+# Thoughts
+# A lot of confusing / annoying logic in EJScreenAPI 
+# Have "Handler" abstract base class,
+# Then a census / geometry handler that handles all the logic from there. 
+class Handler(ABC):
+    @abstractmethod
+    def determine_request_type():
+        """Determine if job is a batch or single job"""
+        pass
+
+    @abstractmethod
+    def _format_inputs():
+        pass
+    
+    @abstractmethod
+    def define_aoi():
+        pass
+
+class GeometryHandler(Handler):
+    def determine_request_type(self, geometry):
+        """Determine if job is a batch or single job
+
+        For geometries, if it's a Shapely base geometry or a list, it's a single run
+        and if it's a geopandas geodataframe, then it's a batch run. 
+        """
+        self.geometry = geometry
+        if isinstance(self.geometry, base.BaseGeometry):
+            request_type = 'Single'
+        elif isinstance(self.geometry, List):
+            request_type = 'Single'
+            self.geometry = self._format_inputs()
+        elif isinstance(self.geometry, gpd.GeoDataFrame):
+            request_type = 'Batch'
+        return request_type, self.geometry
+    
+    def _format_inputs(self):
+        """"""
+        if len(self.geometry) == 1:
+            self.geometry = Point(self.geometry)
+            self._request_type = 'Single'
+        elif (len(self.geometry) > 1) and (self.geometry[0] == self.geometry[-1]):
+            self.geometry = Polygon(self.geometry)
+            self._request_type = 'Single'
+        elif (len(self.geometry) > 1):
+            self.geometry = LineString(self.geometry)
+            self._request_type = 'Single'
+        else:
+            raise ValueError("aoi_input must be a geodataframe, Shapely geometry, or Shapely-compatible list of coordinate pairs")
+
+    
+    def define_aoi(self):
+        if isinstance(self.geometry, Point):
+            if self.buffer is None:
+                print(f'Buffer required for Point type geometry. Assuming a buffer of 1 {self.unit}.')
+                self.buffer = 1
+            return PointAOI(self.geometry, self.buffer, self.unit)
+        elif isinstance(self.geometry, LineString):
+            if self.buffer is None:
+                print(f'Buffer required for LineString type geometry. Assuming a buffer of 1 {self.unit}.')
+                self.buffer = 1
+            return LineAOI(self.geometry, self.buffer, self.unit)
+        elif isinstance(self.geometry, Polygon):
+            return PolygonAOI(self.geometry, self.buffer, self.unit)
+
+
+
+ 
 
 class EJScreenAPI:
     api_base_url = 'https://ejscreen.epa.gov/mapper/ejscreenRESTbroker.aspx'
